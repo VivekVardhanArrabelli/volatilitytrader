@@ -11,7 +11,7 @@ from .risk import calculate_shares, calculate_stop_loss, calculate_take_profit
 from .execution import ExecutionEngine
 from .account import AccountState, check_circuit_breakers
 from .metrics import compute_metrics, Trade, Daily
-from .config import RISK_RULES
+from .config import RISK_RULES, FILL_RULES
 
 
 @dataclass
@@ -126,7 +126,20 @@ class StrategyBacktester:
                     atr = ctx.atr_percent * ctx.price / 100
                     stop = calculate_stop_loss(decision.signal_type or BREAKOUT, ctx.price, atr)
                     tp = calculate_take_profit(ctx.price, stop, decision.signal_type or BREAKOUT)
-                    qty = calculate_shares(self.account.equity, ctx.price, stop)
+                    # Position size by risk and cash/exposure constraints
+                    qty = calculate_shares(
+                        self.account.equity,
+                        ctx.price,
+                        stop,
+                        RISK_RULES.get("risk_fraction", 0.01),
+                    )
+                    # Cap by available cash using conservative fill estimate (ask + slippage)
+                    ask = market_by_symbol[symbol]["ask"]
+                    slip_factor = 1 + (FILL_RULES["slippage_bps"] / 10000)
+                    est_fill_per_share = ask * slip_factor if ask > 0 else ctx.price
+                    if est_fill_per_share > 0:
+                        max_qty_by_cash = int(self.account.cash // est_fill_per_share)
+                        qty = max(0, min(qty, max_qty_by_cash))
                     if qty <= 0:
                         continue
                     if not self._check_position_limits(symbol, qty, market_by_symbol):
