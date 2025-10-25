@@ -31,7 +31,12 @@ def make_dummy_bars(symbol: str, days: int = 220) -> list[Bar]:
 
 
 def main() -> None:
-    symbols = {"XYZ": make_dummy_bars("XYZ")}
+    # Multi-symbol demo
+    symbols = {
+        "XYZ": make_dummy_bars("XYZ"),
+        "ABC": make_dummy_bars("ABC"),
+        "DEF": make_dummy_bars("DEF"),
+    }
     bt = StrategyBacktester(account_equity=100_000)
     result = bt.run(symbols)
     print({

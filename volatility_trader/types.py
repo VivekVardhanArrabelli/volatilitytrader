@@ -50,6 +50,13 @@ class Position:
     avg_price: float
     stop_price: Optional[float] = None
     take_profit: Optional[float] = None
+    # Enhanced tracking for metrics and management
+    entry_time: Optional[int] = None
+    bars_held: int = 0
+    peak_unrealized: float = 0.0
+    max_drawdown_unrealized: float = 0.0
+    time_in_drawdown_bars: int = 0
+    last_price: Optional[float] = None
 
 
 @dataclass
