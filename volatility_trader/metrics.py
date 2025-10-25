@@ -8,6 +8,10 @@ from typing import List
 class Trade:
     pnl: float
     adhered_to_plan: bool
+    entry_time: int | None = None
+    exit_time: int | None = None
+    duration_bars: int = 0
+    time_in_drawdown_bars: int = 0
 
 
 @dataclass
@@ -25,6 +29,8 @@ class Metrics:
     orders_per_day: float
     plan_adherence: float
     slippage_impact_bps: float
+    avg_trade_duration_bars: float
+    avg_time_in_drawdown_bars: float
 
 
 def compute_metrics(trades: List[Trade], dailies: List[Daily], slippage_bps_samples: List[float]) -> Metrics:
@@ -61,6 +67,9 @@ def compute_metrics(trades: List[Trade], dailies: List[Daily], slippage_bps_samp
     plan_adherence = (sum(1 for t in trades if t.adhered_to_plan) / len(trades)) if trades else 0.0
     slippage_impact_bps = sum(slippage_bps_samples) / len(slippage_bps_samples) if slippage_bps_samples else 0.0
 
+    avg_duration = sum(t.duration_bars for t in trades) / len(trades) if trades else 0.0
+    avg_time_in_dd = sum(t.time_in_drawdown_bars for t in trades) / len(trades) if trades else 0.0
+
     return Metrics(
         win_rate=win_rate,
         profit_factor=profit_factor,
@@ -70,4 +79,6 @@ def compute_metrics(trades: List[Trade], dailies: List[Daily], slippage_bps_samp
         orders_per_day=orders_per_day,
         plan_adherence=plan_adherence,
         slippage_impact_bps=slippage_impact_bps,
+        avg_trade_duration_bars=avg_duration,
+        avg_time_in_drawdown_bars=avg_time_in_dd,
     )
