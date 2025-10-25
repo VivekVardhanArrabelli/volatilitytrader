@@ -9,6 +9,7 @@ FILL_RULES = {
 }
 
 RISK_RULES = {
+    "risk_fraction": 0.01,
     "max_gross_exposure": 0.30,
     "per_symbol_max": 0.15,
     "max_positions": 3,
