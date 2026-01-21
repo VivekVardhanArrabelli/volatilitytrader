@@ -20,6 +20,7 @@ TRADING_SCHEDULE = {
     "scan_times_et": ["09:45", "11:00", "13:00", "14:30"],
     "no_new_after_et": "15:00",
     "close_all_by_et": "15:45",
+    "timezone": "US/Eastern",
 }
 
 
