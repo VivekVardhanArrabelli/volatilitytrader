@@ -187,6 +187,21 @@ REQUIRED_METRICS = [
 
 ---
 
+## Backtesting with Polygon data
+
+You can run the backtest against Polygon historical aggregates by setting your API key
+locally and passing the `--polygon` flag. The tool reads `POLYGON_API_KEY` from your
+environment (no key is stored in the repo).
+
+```bash
+export POLYGON_API_KEY="your_key_here"
+python -m volatility_trader --polygon --symbols AAPL,MSFT --start 2023-01-01 --end 2023-06-30 --timespan minute
+```
+
+For offline experimentation, omit `--polygon` and the script will generate dummy data.
+
+---
+
 ## Contributing
 
 - Propose changes via pull request with a clear rationale, test plan, and impact

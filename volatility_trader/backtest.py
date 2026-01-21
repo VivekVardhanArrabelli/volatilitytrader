@@ -2,16 +2,18 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
 
 from .types import Bar, Order, OrderType, Side, Position
 from .signals import evaluate_breakout, evaluate_reversal, BREAKOUT
-from .scanner import build_signal_context
+from .scanner import build_signal_context, is_scan_time_et, within_entry_window, close_all_time
 from .risk import calculate_shares, calculate_stop_loss, calculate_take_profit
 from .execution import ExecutionEngine
 from .account import AccountState, check_circuit_breakers
 from .metrics import compute_metrics, Trade, Daily
-from .config import RISK_RULES, FILL_RULES
+from .config import RISK_RULES, FILL_RULES, TRADING_SCHEDULE
+from .indicators import bollinger
 
 
 @dataclass
@@ -21,13 +23,15 @@ class BacktestResult:
 
 
 class StrategyBacktester:
-    def __init__(self, account_equity: float):
+    def __init__(self, account_equity: float, respect_schedule: bool = True):
         self.engine = ExecutionEngine()
         self.account = AccountState(equity=account_equity, cash=account_equity)
         self.positions: Dict[str, Position] = {}
         self.trades: List[Trade] = []
         self.dailies: List[Daily] = []
         self.slippage_samples: List[float] = []
+        self.respect_schedule = respect_schedule
+        self.market_tz = ZoneInfo(TRADING_SCHEDULE.get("timezone", "US/Eastern"))
 
     def _current_price(self, symbol: str, market_by_symbol: Dict[str, Dict[str, float]]) -> Optional[float]:
         m = market_by_symbol.get(symbol)
@@ -82,6 +86,8 @@ class StrategyBacktester:
 
         last_day: Optional[Tuple[int, int, int]] = None
         for t in all_times:
+            now = datetime.fromtimestamp(t, tz=timezone.utc)
+            now_et = now.astimezone(self.market_tz)
             # Construct per-symbol rolling history up to time t for indicators
             market_by_symbol: Dict[str, Dict[str, float]] = {}
             for symbol, bars in symbol_to_bars.items():
@@ -92,13 +98,18 @@ class StrategyBacktester:
                 ctx = build_signal_context(history)
                 if ctx is None:
                     continue
+                current_bar = bars_by_symbol_time[symbol].get(t)
+                if not current_bar:
+                    continue
 
                 # Prepare market snapshot for fills and OCO monitoring
+                spread_bps = FILL_RULES["min_spread_bps"]
+                spread = ctx.price * (spread_bps / 10000)
                 market_by_symbol[symbol] = {
-                    "bid": ctx.price * 0.999,
-                    "ask": ctx.price * 1.001,
+                    "bid": ctx.price - (spread / 2),
+                    "ask": ctx.price + (spread / 2),
                     "last": ctx.price,
-                    "volume": 1_000_000,
+                    "volume": current_bar.volume,
                     "time": t,
                 }
 
@@ -113,12 +124,20 @@ class StrategyBacktester:
                 ctx = build_signal_context(history)
                 if ctx is None:
                     continue
-                now = datetime.fromtimestamp(t, tz=timezone.utc)
+                if self.respect_schedule:
+                    if not within_entry_window(now_et) or not is_scan_time_et(now_et):
+                        continue
                 status = check_circuit_breakers(self.account, self.positions, now)
                 if status != "OK":
                     continue
 
-                decision = evaluate_breakout(ctx, bb_width_is_20d_low=True, todays_volume_gt_yday=True)
+                bb_width_is_20d_low = _bb_width_is_20d_low(history)
+                todays_volume_gt_yday = _todays_volume_gt_yday(history)
+                decision = evaluate_breakout(
+                    ctx,
+                    bb_width_is_20d_low=bb_width_is_20d_low,
+                    todays_volume_gt_yday=todays_volume_gt_yday,
+                )
                 if not decision.should_enter:
                     decision = evaluate_reversal(ctx)
 
@@ -152,6 +171,7 @@ class StrategyBacktester:
 
                     # Open position
                     # Deduct cash for the purchase
+                    oco_id = str(uuid.uuid4())
                     self.account.cash -= fill.price * fill.filled_qty
                     self.positions[symbol] = Position(
                         symbol=symbol,
@@ -159,6 +179,7 @@ class StrategyBacktester:
                         avg_price=fill.price,
                         stop_price=stop,
                         take_profit=tp,
+                        oco_group=oco_id,
                         entry_time=t,
                         bars_held=0,
                         peak_unrealized=0.0,
@@ -169,7 +190,6 @@ class StrategyBacktester:
                     # Update trade history for cooldown logic
                     self.account.trade_history[symbol] = now
                     # Register OCO orders for continuous monitoring
-                    oco_id = str(uuid.uuid4())
                     stop_order = Order(symbol=symbol, side=Side.SELL, quantity=qty, order_type=OrderType.LIMIT, price=stop, oco_group=oco_id)
                     tp_order = Order(symbol=symbol, side=Side.SELL, quantity=qty, order_type=OrderType.LIMIT, price=tp, oco_group=oco_id)
                     self.engine.register_oco(stop_order, tp_order)
@@ -196,6 +216,9 @@ class StrategyBacktester:
                 # Add back sale proceeds
                 self.account.cash += fill.price * pos.quantity
                 del self.positions[symbol]
+
+            if self.respect_schedule and close_all_time(now_et):
+                self._close_all_positions(market_by_symbol)
 
             # Update open position metrics with latest market prices
             for symbol, pos in list(self.positions.items()):
@@ -226,6 +249,31 @@ class StrategyBacktester:
 
         return BacktestResult(trades=self.trades, dailies=self.dailies)
 
+    def _close_all_positions(self, market_by_symbol: Dict[str, Dict[str, float]]) -> None:
+        for symbol, pos in list(self.positions.items()):
+            market = market_by_symbol.get(symbol)
+            if not market:
+                continue
+            order = Order(symbol=symbol, side=Side.SELL, quantity=pos.quantity, order_type=OrderType.MARKET)
+            fill = self.engine.simulate_fill(order, market)
+            if not fill:
+                continue
+            pnl = (fill.price - pos.avg_price) * pos.quantity
+            trade = Trade(
+                pnl=pnl,
+                adhered_to_plan=True,
+                entry_time=pos.entry_time,
+                exit_time=fill.time,
+                duration_bars=pos.bars_held,
+                time_in_drawdown_bars=pos.time_in_drawdown_bars,
+            )
+            self.trades.append(trade)
+            self.account.daily_pnl += pnl
+            self.account.cash += fill.price * pos.quantity
+            if pos.oco_group:
+                self.engine.cancel_oco_group(pos.oco_group)
+            del self.positions[symbol]
+
     def summarize(self) -> dict:
         m = compute_metrics(self.trades, self.dailies, self.slippage_samples)
         return {
@@ -240,3 +288,24 @@ class StrategyBacktester:
             "avg_trade_duration_bars": m.avg_trade_duration_bars,
             "avg_time_in_drawdown_bars": m.avg_time_in_drawdown_bars,
         }
+
+
+def _bb_width_is_20d_low(history: List[Bar]) -> bool:
+    closes = [b.close for b in history]
+    lower, _, upper = bollinger(closes, 20, 2.0)
+    if len(lower) < 20 or len(upper) < 20:
+        return False
+    widths = []
+    for l, u in zip(lower, upper):
+        if l == 0:
+            widths.append(0.0)
+        else:
+            widths.append((u - l) / l * 100)
+    last_20 = widths[-20:]
+    return last_20[-1] <= min(last_20)
+
+
+def _todays_volume_gt_yday(history: List[Bar]) -> bool:
+    if len(history) < 2:
+        return False
+    return history[-1].volume > history[-2].volume

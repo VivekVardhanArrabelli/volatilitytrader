@@ -50,6 +50,7 @@ class Position:
     avg_price: float
     stop_price: Optional[float] = None
     take_profit: Optional[float] = None
+    oco_group: Optional[str] = None
     # Enhanced tracking for metrics and management
     entry_time: Optional[int] = None
     bars_held: int = 0
